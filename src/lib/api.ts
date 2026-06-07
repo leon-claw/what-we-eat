@@ -1,17 +1,9 @@
 import type { FoodOption, Room, VoteChoice } from "../types";
+import { buildRoomWebSocketUrl } from "./apiUrl";
 
 const API_BASE =
   import.meta.env.VITE_API_URL ||
   `${window.location.protocol}//${window.location.hostname || "localhost"}:8787`;
-
-function wsBase() {
-  const configured = import.meta.env.VITE_WS_URL;
-  if (configured) return configured;
-
-  const url = new URL(API_BASE);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.toString().replace(/\/$/, "");
-}
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -93,7 +85,10 @@ export function resetRoom(roomCode: string, memberId: string) {
 }
 
 export function getRoomWebSocketUrl(roomCode: string) {
-  const url = new URL(`${wsBase()}/ws`);
-  url.searchParams.set("roomCode", roomCode);
-  return url.toString();
+  return buildRoomWebSocketUrl(
+    API_BASE,
+    window.location.origin,
+    roomCode,
+    import.meta.env.VITE_WS_URL,
+  );
 }

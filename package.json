@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "cors": "^2.8.6",
+    "eruda": "^3.4.3",
     "express": "^5.2.1",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",

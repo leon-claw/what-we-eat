@@ -1,0 +1,16 @@
+<svg width="220" height="180" viewBox="0 0 220 180" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">No match face</title>
+  <desc id="desc">A playful disappointed face for no shared food matches.</desc>
+  <rect x="26" y="18" width="168" height="138" rx="52" fill="#FFF4CF"/>
+  <path d="M46 48C65 20 156 18 178 53C189 70 191 108 180 130C166 158 67 160 48 132C33 110 32 68 46 48Z" fill="#FFD66B"/>
+  <path d="M53 121C77 147 147 148 173 121" stroke="#FF9A3D" stroke-width="10" stroke-linecap="round"/>
+  <path d="M70 71L92 87M92 71L70 87" stroke="#273244" stroke-width="9" stroke-linecap="round"/>
+  <path d="M128 71L150 87M150 71L128 87" stroke="#273244" stroke-width="9" stroke-linecap="round"/>
+  <path d="M86 118C98 108 122 108 134 118" stroke="#273244" stroke-width="8" stroke-linecap="round"/>
+  <path d="M38 76L18 66" stroke="#FF7A45" stroke-width="7" stroke-linecap="round"/>
+  <path d="M181 75L203 65" stroke="#FF7A45" stroke-width="7" stroke-linecap="round"/>
+  <path d="M107 36L110 16" stroke="#00A878" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="58" cy="101" r="9" fill="#FF8FB1" opacity=".78"/>
+  <circle cx="162" cy="101" r="9" fill="#FF8FB1" opacity=".78"/>
+  <path d="M50 31C62 21 80 17 101 18" stroke="white" stroke-width="7" stroke-linecap="round" opacity=".58"/>
+</svg>

@@ -1,4 +1,4 @@
-import type { FoodOption, Room, VoteChoice } from "../types";
+import type { FoodOption, Room, Vote, VoteChoice } from "../types";
 import { buildRoomWebSocketUrl, resolveApiBase } from "./apiUrl";
 
 const API_BASE = resolveApiBase({
@@ -78,6 +78,16 @@ export function recordRoomVote(roomCode: string, memberId: string, dishId: strin
   return apiRequest<{ room: Room }>(`/api/rooms/${roomCode}/votes`, {
     method: "POST",
     body: JSON.stringify({ memberId, dishId, choice }),
+  });
+}
+
+export function recordRoomVotes(roomCode: string, memberId: string, votes: Vote[]) {
+  return apiRequest<{ room: Room }>(`/api/rooms/${roomCode}/votes/batch`, {
+    method: "POST",
+    body: JSON.stringify({
+      memberId,
+      votes: votes.map(({ dishId, choice }) => ({ dishId, choice })),
+    }),
   });
 }
 

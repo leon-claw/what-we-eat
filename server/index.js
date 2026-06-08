@@ -10,6 +10,7 @@ import {
   normalizeRoomOption,
   normalizeRoomOptions,
 } from "./room-options.js";
+import { normalizeRoomVoteBatch } from "./room-votes.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8787);
@@ -564,6 +565,61 @@ app.post("/api/rooms/:roomCode/votes", (request, response) => {
   if (roomIsDone(nextRoom)) {
     statements.updateRoomStatus.run("finished", Date.now(), room.roomCode);
   }
+
+  const finalRoom = getPublicRoom(room.roomCode);
+  broadcast(room.roomCode);
+  response.json({ room: finalRoom });
+});
+
+app.post("/api/rooms/:roomCode/votes/batch", (request, response) => {
+  const room = requireRoom(request, response);
+  if (!room) return;
+
+  const memberId = String(request.body.memberId || "").trim();
+
+  if (room.status !== "selecting") {
+    sendError(response, 409, "房间尚未开始选菜。");
+    return;
+  }
+
+  if (!statements.memberInRoom.get(room.roomCode, memberId)) {
+    sendError(response, 403, "你不在这个房间里。");
+    return;
+  }
+
+  const normalized = normalizeRoomVoteBatch(
+    room,
+    memberId,
+    request.body.votes,
+  );
+
+  if (normalized.error) {
+    sendError(response, 400, normalized.error);
+    return;
+  }
+
+  const now = Date.now();
+  runTransaction(() => {
+    for (const vote of normalized.votes) {
+      statements.upsertVote.run(
+        room.roomCode,
+        vote.memberId,
+        vote.dishId,
+        vote.choice,
+        now,
+        now,
+      );
+    }
+
+    const nextRoom = getPublicRoom(room.roomCode);
+    if (roomIsDone(nextRoom)) {
+      statements.updateRoomStatus.run(
+        "finished",
+        Date.now(),
+        room.roomCode,
+      );
+    }
+  });
 
   const finalRoom = getPublicRoom(room.roomCode);
   broadcast(room.roomCode);

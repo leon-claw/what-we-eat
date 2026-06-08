@@ -11,6 +11,7 @@ import {
   Layers3,
   ListPlus,
   ListChecks,
+  LoaderCircle,
   Plus,
   RefreshCw,
   Send,
@@ -21,7 +22,13 @@ import {
   Users,
   Utensils,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import DishCard from "./components/DishCard";
 import DishForm, {
   type FoodOptionFormResult,
@@ -38,7 +45,7 @@ import {
   getRoomWebSocketUrl,
   joinRoom,
   leaveRoom as leaveRoomApi,
-  recordRoomVote,
+  recordRoomVotes,
   resetRoom,
   startRoom,
 } from "./lib/api";
@@ -48,6 +55,10 @@ import {
   type CategoryResult,
   type FoodOptionResult,
 } from "./lib/results";
+import {
+  mergeMemberLocalVotes,
+  upsertLocalVote,
+} from "./lib/roomVotes";
 import {
   buildSingleSetupPreference,
   optionsForCategories,
@@ -91,6 +102,13 @@ type RoomNotice = {
 type ViewDirection = "forward" | "back";
 type IdentityPurpose = "setup" | "edit";
 type SetupPurpose = "initial" | "reselect";
+type RoomPendingAction =
+  | "create"
+  | "join"
+  | "leave"
+  | "start"
+  | "reset"
+  | "submit-votes";
 
 function loadInitialView(): FlowMode {
   return loadPlayerName().trim() &&
@@ -119,6 +137,25 @@ function getRoomStatusLabel(room: Room) {
   if (room.status === "waiting") return "等待加入";
   if (room.status === "finished") return "已汇总";
   return "选菜中";
+}
+
+function LoadingLabel({
+  loading,
+  icon,
+  label,
+  loadingLabel,
+}: {
+  loading: boolean;
+  icon: ReactNode;
+  label: string;
+  loadingLabel?: string;
+}) {
+  return (
+    <>
+      {loading ? <LoaderCircle className="spinner-icon" size={18} /> : icon}
+      {loading ? loadingLabel ?? label : label}
+    </>
+  );
 }
 
 type EmptyResultState = {
@@ -231,6 +268,9 @@ export default function App() {
   const [nickname, setNickname] = useState(() => loadPlayerName());
   const [roomCodeInput, setRoomCodeInput] = useState("");
   const [roomError, setRoomError] = useState("");
+  const [roomPendingAction, setRoomPendingAction] =
+    useState<RoomPendingAction | null>(null);
+  const [roomLocalVotes, setRoomLocalVotes] = useState<Vote[]>([]);
   const [roomNotice, setRoomNotice] = useState<RoomNotice | null>(null);
   const [copied, setCopied] = useState(false);
   const previousRoomStatusRef = useRef<string | null>(null);
@@ -269,11 +309,22 @@ export default function App() {
       .filter(Boolean) as FoodOption[];
   }, [allOptions, currentRoom, session?.kind, singleSessionOptions]);
 
+  const visibleRoomVotes = useMemo(() => {
+    if (session?.kind !== "room" || !currentRoom) return [];
+    return mergeMemberLocalVotes(
+      currentRoom.votes,
+      roomLocalVotes,
+      session.member.id,
+    );
+  }, [currentRoom, roomLocalVotes, session]);
+
   const memberVotes = useMemo(() => {
     if (!session) return [];
     if (session.kind === "single") return singleVotes;
-    return currentRoom ? votesForMember(currentRoom, session.member.id) : [];
-  }, [currentRoom, session, singleVotes]);
+    return visibleRoomVotes.filter(
+      (vote) => vote.memberId === session.member.id,
+    );
+  }, [session, singleVotes, visibleRoomVotes]);
 
   const remainingOptions = useMemo(() => {
     const votedDishIds = new Set(memberVotes.map((vote) => vote.dishId));
@@ -283,12 +334,14 @@ export default function App() {
   const currentOption = remainingOptions[0] ?? null;
   const sessionMembers =
     session?.kind === "room" && currentRoom ? currentRoom.members : session ? [session.member] : [];
-  const sessionVotes = session?.kind === "room" && currentRoom ? currentRoom.votes : singleVotes;
+  const sessionVotes = session?.kind === "room" && currentRoom ? visibleRoomVotes : singleVotes;
   const results = summarizeResults(sessionOptions, sessionMembers, sessionVotes);
   const isRoomHost =
     session?.kind === "room" && currentRoom ? currentRoom.hostMemberId === session.member.id : false;
   const hasCompletedSetup =
     configuredOptions.length > 0 && Boolean(playerName.trim());
+  const roomRequestPending = roomPendingAction !== null;
+  const roomVoteSubmitting = roomPendingAction === "submit-votes";
 
   const navigate = (
     nextView: FlowMode,
@@ -468,6 +521,14 @@ export default function App() {
       setView("results");
     }
   }, [currentRoom, session, view]);
+
+  useEffect(() => {
+    if (session?.kind === "room" && currentRoom?.status === "selecting") {
+      return;
+    }
+
+    setRoomLocalVotes([]);
+  }, [currentRoom?.roomCode, currentRoom?.status, session?.kind]);
 
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
@@ -668,27 +729,175 @@ export default function App() {
   };
 
   const leaveRoom = async () => {
-    if (session?.kind === "room" && currentRoom) {
-      try {
-        await leaveRoomApi(currentRoom.roomCode, session.member.id);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "退出房间失败，请稍后再试。";
-        if (!message.includes("已经不在")) {
-          setRoomError(message);
-          return;
+    if (roomRequestPending) return;
+
+    setRoomPendingAction("leave");
+
+    try {
+      if (session?.kind === "room" && currentRoom) {
+        try {
+          await leaveRoomApi(currentRoom.roomCode, session.member.id);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "退出房间失败，请稍后再试。";
+          if (!message.includes("已经不在")) {
+            setRoomError(message);
+            return;
+          }
         }
       }
+
+      clearCurrentMember();
+      roomSocketRef.current?.close();
+      setCurrentRoom(null);
+      setSession(null);
+      setSingleVotes([]);
+      setRoomLocalVotes([]);
+      setRoomError("");
+      setRoomNotice(null);
+      setCopied(false);
+      navigate(hasCompletedSetup ? "home" : "setup-choice", "back");
+    } finally {
+      setRoomPendingAction(null);
+    }
+  };
+
+  const enterRoom = async (action: "create" | "join") => {
+    if (roomRequestPending) return;
+
+    const name = nickname.trim() || playerName.trim();
+    let roomCode = normalizeRoomCode(roomCodeInput);
+
+    if (!name) {
+      setRoomError("请输入昵称。");
+      return;
     }
 
-    clearCurrentMember();
-    roomSocketRef.current?.close();
-    setCurrentRoom(null);
-    setSession(null);
-    setSingleVotes([]);
+    if (action === "create" && !configuredOptions.length) {
+      setRoomError("当前还没有已选菜品，先去菜品池重选一批。");
+      return;
+    }
+
+    if (action === "join" && !roomCode) {
+      setRoomError("请输入房间码。");
+      return;
+    }
+
+    setRoomPendingAction(action);
+
+    try {
+      savePlayerName(name);
+      setPlayerName(name);
+      const restored = loadCurrentMember();
+      const payload =
+        action === "create"
+          ? await createRoom(name, configuredOptions, roomCode || undefined)
+          : await joinRoom(
+              roomCode,
+              name,
+              restored?.roomCode === roomCode ? restored.member.id : undefined,
+            );
+
+      saveCurrentMember({ roomCode: payload.room.roomCode, member: payload.member });
+      setCurrentRoom(payload.room);
+      setSession({ kind: "room", roomCode: payload.room.roomCode, member: payload.member });
+      setRoomLocalVotes([]);
+      setNickname(name);
+      setRoomCodeInput(payload.room.roomCode);
+      setRoomError("");
+      setView("room");
+    } catch (error) {
+      setRoomError(error instanceof Error ? error.message : "房间接口请求失败。");
+    } finally {
+      setRoomPendingAction(null);
+    }
+  };
+
+  const startRoomSelection = async () => {
+    if (
+      roomRequestPending ||
+      session?.kind !== "room" ||
+      !currentRoom ||
+      !isRoomHost ||
+      currentRoom.status !== "waiting" ||
+      currentRoom.members.length < 2
+    ) {
+      return;
+    }
+
+    setRoomPendingAction("start");
+
+    try {
+      const { room } = await startRoom(currentRoom.roomCode, session.member.id);
+      setCurrentRoom(room);
+      setRoomLocalVotes([]);
+      setRoomError("");
+      setView("swipe");
+    } catch (error) {
+      setRoomError(error instanceof Error ? error.message : "开始选菜失败。");
+    } finally {
+      setRoomPendingAction(null);
+    }
+  };
+
+  const submitRoomVotes = async (votes: Vote[]) => {
+    if (
+      roomVoteSubmitting ||
+      session?.kind !== "room" ||
+      !currentRoom ||
+      currentRoom.status !== "selecting"
+    ) {
+      return;
+    }
+
+    setRoomPendingAction("submit-votes");
     setRoomError("");
-    setRoomNotice(null);
-    setCopied(false);
-    navigate(hasCompletedSetup ? "home" : "setup-choice", "back");
+
+    try {
+      const { room } = await recordRoomVotes(
+        currentRoom.roomCode,
+        session.member.id,
+        votes,
+      );
+      setCurrentRoom(room);
+      setRoomLocalVotes([]);
+      setRoomError("");
+    } catch (error) {
+      setRoomError(error instanceof Error ? error.message : "提交选择失败，请稍后再试。");
+    } finally {
+      setRoomPendingAction(null);
+    }
+  };
+
+  const resetRoomVotes = async () => {
+    if (
+      roomRequestPending ||
+      session?.kind !== "room" ||
+      !currentRoom ||
+      !isRoomHost
+    ) {
+      return;
+    }
+
+    setRoomPendingAction("reset");
+
+    try {
+      const { room } = await resetRoom(currentRoom.roomCode, session.member.id);
+      setCurrentRoom(room);
+      setRoomLocalVotes([]);
+      setRoomError("");
+      setView("room");
+    } catch (error) {
+      setRoomError(error instanceof Error ? error.message : "开启新一轮失败。");
+    } finally {
+      setRoomPendingAction(null);
+    }
+  };
+
+  const copyRoomCode = async () => {
+    if (!currentRoom) return;
+    await navigator.clipboard?.writeText(currentRoom.roomCode);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
   };
 
   const confirmExitGame = async () => {
@@ -711,68 +920,8 @@ export default function App() {
     navigate("home", "back");
   };
 
-  const enterRoom = async (action: "create" | "join") => {
-    const name = nickname.trim() || playerName.trim();
-    let roomCode = normalizeRoomCode(roomCodeInput);
-
-    if (!name) {
-      setRoomError("请输入昵称。");
-      return;
-    }
-
-    if (action === "join" && !roomCode) {
-      setRoomError("请输入房间码。");
-      return;
-    }
-
-    try {
-      savePlayerName(name);
-      setPlayerName(name);
-      const restored = loadCurrentMember();
-      const payload =
-        action === "create"
-          ? await createRoom(name, allOptions, roomCode || undefined)
-          : await joinRoom(
-              roomCode,
-              name,
-              restored?.roomCode === roomCode ? restored.member.id : undefined,
-            );
-
-      saveCurrentMember({ roomCode: payload.room.roomCode, member: payload.member });
-      setCurrentRoom(payload.room);
-      setSession({ kind: "room", roomCode: payload.room.roomCode, member: payload.member });
-      setNickname(name);
-      setRoomCodeInput(payload.room.roomCode);
-      setRoomError("");
-      setView("room");
-    } catch (error) {
-      setRoomError(error instanceof Error ? error.message : "房间接口请求失败。");
-    }
-  };
-
-  const startRoomSelection = async () => {
-    if (
-      session?.kind !== "room" ||
-      !currentRoom ||
-      !isRoomHost ||
-      currentRoom.status !== "waiting" ||
-      currentRoom.members.length < 2
-    ) {
-      return;
-    }
-
-    try {
-      const { room } = await startRoom(currentRoom.roomCode, session.member.id);
-      setCurrentRoom(room);
-      setRoomError("");
-      setView("swipe");
-    } catch (error) {
-      setRoomError(error instanceof Error ? error.message : "开始选菜失败。");
-    }
-  };
-
   const recordVote = async (choice: VoteChoice) => {
-    if (!session || !currentOption) return;
+    if (!session || !currentOption || roomVoteSubmitting) return;
 
     const vote: Vote = {
       memberId: session.member.id,
@@ -792,33 +941,18 @@ export default function App() {
 
     if (!currentRoom || currentRoom.status !== "selecting") return;
 
-    try {
-      const { room } = await recordRoomVote(currentRoom.roomCode, vote.memberId, vote.dishId, vote.choice);
-      setCurrentRoom(room);
-      setRoomError("");
-    } catch (error) {
-      setRoomError(error instanceof Error ? error.message : "投票失败，请稍后再试。");
+    const nextVotes = upsertLocalVote(roomLocalVotes, vote);
+    const nextMemberVotes = mergeMemberLocalVotes(
+      currentRoom.votes,
+      nextVotes,
+      session.member.id,
+    ).filter((item) => item.memberId === session.member.id);
+    setRoomLocalVotes(nextVotes);
+    setRoomError("");
+
+    if (nextMemberVotes.length >= sessionOptions.length) {
+      void submitRoomVotes(nextVotes);
     }
-  };
-
-  const resetRoomVotes = async () => {
-    if (session?.kind !== "room" || !currentRoom || !isRoomHost) return;
-
-    try {
-      const { room } = await resetRoom(currentRoom.roomCode, session.member.id);
-      setCurrentRoom(room);
-      setRoomError("");
-      setView("room");
-    } catch (error) {
-      setRoomError(error instanceof Error ? error.message : "开启新一轮失败。");
-    }
-  };
-
-  const copyRoomCode = async () => {
-    if (!currentRoom) return;
-    await navigator.clipboard?.writeText(currentRoom.roomCode);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
   };
 
   const renderSetupChoice = () => (
@@ -1332,8 +1466,14 @@ export default function App() {
   const renderRoom = () => {
     if (session?.kind === "room" && currentRoom) {
       const done = roomIsDone(currentRoom);
-      const currentMemberDone = memberIsDone(currentRoom, session.member.id);
-      const canHostStart = isRoomHost && currentRoom.status === "waiting" && currentRoom.members.length >= 2;
+      const currentMemberDone =
+        visibleRoomVotes.filter((vote) => vote.memberId === session.member.id)
+          .length >= roomDishCount(currentRoom);
+      const canHostStart =
+        isRoomHost &&
+        currentRoom.status === "waiting" &&
+        currentRoom.members.length >= 2 &&
+        !roomRequestPending;
 
       return (
         <main className="room-layout">
@@ -1348,9 +1488,14 @@ export default function App() {
                 }
                 void leaveRoom();
               }}
+              disabled={roomPendingAction === "leave"}
             >
               <ArrowLeft size={18} />
-              {hasCompletedSetup ? "返回" : "退出"}
+              {roomPendingAction === "leave"
+                ? "退出中"
+                : hasCompletedSetup
+                  ? "返回"
+                  : "退出"}
             </button>
             <div>
               <p className="eyebrow">房间码</p>
@@ -1375,12 +1520,21 @@ export default function App() {
                   onClick={startRoomSelection}
                   disabled={!canHostStart}
                 >
-                  <Send size={18} />
-                  {isRoomHost ? "开始选菜" : "等待房主"}
+                  <LoadingLabel
+                    loading={roomPendingAction === "start"}
+                    icon={<Send size={18} />}
+                    label={isRoomHost ? "开始选菜" : "等待房主"}
+                    loadingLabel="开始中"
+                  />
                 </button>
               ) : null}
               {currentRoom.status === "selecting" ? (
-                <button className="primary-button" type="button" onClick={() => setView("swipe")}>
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() => setView("swipe")}
+                  disabled={roomVoteSubmitting}
+                >
                   <Send size={18} />
                   {currentMemberDone ? "查看进度" : "继续选菜"}
                 </button>
@@ -1398,14 +1552,27 @@ export default function App() {
                 className="ghost-button"
                 type="button"
                 onClick={resetRoomVotes}
-                disabled={!isRoomHost}
+                disabled={!isRoomHost || roomRequestPending}
               >
-                <RefreshCw size={18} />
-                新一轮
+                <LoadingLabel
+                  loading={roomPendingAction === "reset"}
+                  icon={<RefreshCw size={18} />}
+                  label="新一轮"
+                  loadingLabel="重置中"
+                />
               </button>
-              <button className="ghost-button" type="button" onClick={leaveRoom}>
-                <DoorOpen size={18} />
-                退出
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={leaveRoom}
+                disabled={roomRequestPending}
+              >
+                <LoadingLabel
+                  loading={roomPendingAction === "leave"}
+                  icon={<DoorOpen size={18} />}
+                  label="退出"
+                  loadingLabel="退出中"
+                />
               </button>
             </div>
             {roomError ? <p className="form-error">{roomError}</p> : null}
@@ -1434,7 +1601,9 @@ export default function App() {
 
             <div className="member-list">
               {currentRoom.members.map((member) => {
-                const votes = votesForMember(currentRoom, member.id);
+                const votes = visibleRoomVotes.filter(
+                  (vote) => vote.memberId === member.id,
+                );
                 const likes = votes.filter((vote) => vote.choice === "like").length;
                 const dishCount = roomDishCount(currentRoom);
                 const progress = Math.min(votes.length, dishCount);
@@ -1483,6 +1652,9 @@ export default function App() {
           <div>
             <p className="eyebrow">多人房间</p>
             <h1>同一个房间码，多个人一起滑</h1>
+            <p className="room-note">
+              创建房间会使用你当前已选的 {configuredOptions.length} 道菜；加入房间后，以房主创建时的菜品为准。
+            </p>
           </div>
         </section>
 
@@ -1496,6 +1668,7 @@ export default function App() {
                 setRoomError("");
               }}
               placeholder="你的名字"
+              disabled={roomRequestPending}
             />
           </label>
           <label>
@@ -1507,17 +1680,36 @@ export default function App() {
                 setRoomError("");
               }}
               placeholder="创建时可留空"
+              disabled={roomRequestPending}
             />
           </label>
           {roomError ? <p className="form-error">{roomError}</p> : null}
           <div className="room-entry-actions">
-            <button className="primary-button" type="button" onClick={() => enterRoom("create")}>
-              <Plus size={18} />
-              创建房间
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => enterRoom("create")}
+              disabled={roomRequestPending}
+            >
+              <LoadingLabel
+                loading={roomPendingAction === "create"}
+                icon={<Plus size={18} />}
+                label="创建房间"
+                loadingLabel="创建中"
+              />
             </button>
-            <button className="secondary-button" type="button" onClick={() => enterRoom("join")}>
-              <Users size={18} />
-              加入房间
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => enterRoom("join")}
+              disabled={roomRequestPending}
+            >
+              <LoadingLabel
+                loading={roomPendingAction === "join"}
+                icon={<Users size={18} />}
+                label="加入房间"
+                loadingLabel="加入中"
+              />
             </button>
           </div>
         </section>
@@ -1548,6 +1740,19 @@ export default function App() {
       );
     }
 
+    if (session.kind === "room" && roomVoteSubmitting) {
+      return (
+        <main className="done-layout">
+          <section className="done-panel submitting-panel" role="status">
+            <LoaderCircle className="submission-spinner" size={44} />
+            <p className="eyebrow">正在提交</p>
+            <h1>把这一轮选择交给房间</h1>
+            <p>正在统一保存 {roomLocalVotes.length} 道菜的选择，稍等一下。</p>
+          </section>
+        </main>
+      );
+    }
+
     if (session.kind === "room" && currentRoom?.status === "finished") {
       return renderResults();
     }
@@ -1559,18 +1764,48 @@ export default function App() {
         : remainingOptions.length === 0;
 
     if (!currentOption) {
+      const roomSubmissionFailed =
+        session.kind === "room" &&
+        currentRoom?.status === "selecting" &&
+        memberVotes.length >= sessionOptions.length &&
+        Boolean(roomError);
+
       return (
         <main className="done-layout">
           <section className="done-panel">
-            <p className="eyebrow">{session.kind === "room" ? "房间" : "单人"}</p>
-            <h1>{done ? "结果已经出炉" : "你已经选完了"}</h1>
+            <p className="eyebrow">
+              {roomSubmissionFailed
+                ? "提交未完成"
+                : session.kind === "room"
+                  ? "房间"
+                  : "单人"}
+            </p>
+            <h1>
+              {roomSubmissionFailed
+                ? "选择还在，网络没跟上"
+                : done
+                  ? "结果已经出炉"
+                  : "你已经选完了"}
+            </h1>
             <p>
-              {session.kind === "room" && currentRoom && !done
+              {roomSubmissionFailed
+                ? roomError
+                : session.kind === "room" && currentRoom && !done
                 ? "等其他成员完成后，汇总页会按共同喜欢优先排序。"
                 : "可以查看结果，也可以重新开一轮。"}
             </p>
             <div className="room-actions">
-              {session.kind === "room" && currentRoom && !done ? (
+              {roomSubmissionFailed ? (
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() => void submitRoomVotes(roomLocalVotes)}
+                  disabled={roomRequestPending}
+                >
+                  <RefreshCw size={18} />
+                  重新提交
+                </button>
+              ) : session.kind === "room" && currentRoom && !done ? (
                 <button className="secondary-button" type="button" onClick={() => setView("room")}>
                   <Users size={18} />
                   成员进度
@@ -1587,9 +1822,21 @@ export default function App() {
                 onClick={
                   session.kind === "single" ? restartSingle : resetRoomVotes
                 }
+                disabled={session.kind === "room" && roomRequestPending}
               >
-                <RefreshCw size={18} />
-                新一轮
+                {session.kind === "room" ? (
+                  <LoadingLabel
+                    loading={roomPendingAction === "reset"}
+                    icon={<RefreshCw size={18} />}
+                    label="新一轮"
+                    loadingLabel="重置中"
+                  />
+                ) : (
+                  <>
+                    <RefreshCw size={18} />
+                    新一轮
+                  </>
+                )}
               </button>
             </div>
           </section>
@@ -1600,9 +1847,18 @@ export default function App() {
     return (
       <main className="swipe-layout">
         <section className="swipe-topbar">
-          <button className="text-button" type="button" onClick={confirmExitGame}>
-            <DoorOpen size={18} />
-            退出
+          <button
+            className="text-button"
+            type="button"
+            onClick={confirmExitGame}
+            disabled={roomRequestPending}
+          >
+            <LoadingLabel
+              loading={roomPendingAction === "leave"}
+              icon={<DoorOpen size={18} />}
+              label="退出"
+              loadingLabel="退出中"
+            />
           </button>
           <div className="progress-summary">
             <span>
@@ -1659,10 +1915,23 @@ export default function App() {
               onClick={
                 session.kind === "single" ? restartSingle : resetRoomVotes
               }
-              disabled={session.kind === "room" && !isRoomHost}
+              disabled={
+                session.kind === "room" && (!isRoomHost || roomRequestPending)
+              }
             >
-              <RefreshCw size={18} />
-              新一轮
+              {session.kind === "room" ? (
+                <LoadingLabel
+                  loading={roomPendingAction === "reset"}
+                  icon={<RefreshCw size={18} />}
+                  label="新一轮"
+                  loadingLabel="重置中"
+                />
+              ) : (
+                <>
+                  <RefreshCw size={18} />
+                  新一轮
+                </>
+              )}
             </button>
             <button className="secondary-button" type="button" onClick={() => setDishFormOpen(true)}>
               <ListPlus size={18} />
@@ -1801,8 +2070,18 @@ export default function App() {
               </>
             ) : null}
             {session ? (
-              <button className="icon-button" type="button" onClick={leaveRoom} title="回到首页">
-                <Home size={20} />
+              <button
+                className="icon-button"
+                type="button"
+                onClick={leaveRoom}
+                title={roomPendingAction === "leave" ? "退出中" : "回到首页"}
+                disabled={roomRequestPending}
+              >
+                {roomPendingAction === "leave" ? (
+                  <LoaderCircle className="spinner-icon" size={20} />
+                ) : (
+                  <Home size={20} />
+                )}
               </button>
             ) : null}
           </div>
@@ -1837,8 +2116,18 @@ export default function App() {
         <div className="room-notice-toast" role="status">
           <p>{roomNotice.message}</p>
           {roomNotice.action === "leave-room" ? (
-            <button className="secondary-button" type="button" onClick={leaveRoom}>
-              退出房间
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={leaveRoom}
+              disabled={roomRequestPending}
+            >
+              <LoadingLabel
+                loading={roomPendingAction === "leave"}
+                icon={<DoorOpen size={18} />}
+                label="退出房间"
+                loadingLabel="退出中"
+              />
             </button>
           ) : null}
         </div>

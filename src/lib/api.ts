@@ -1,9 +1,13 @@
 import type { FoodOption, Room, VoteChoice } from "../types";
-import { buildRoomWebSocketUrl } from "./apiUrl";
+import { buildRoomWebSocketUrl, resolveApiBase } from "./apiUrl";
 
-const API_BASE =
-  import.meta.env.VITE_API_URL ||
-  `${window.location.protocol}//${window.location.hostname || "localhost"}:8787`;
+const API_BASE = resolveApiBase({
+  configuredApiUrl: import.meta.env.VITE_API_URL,
+  baseUrl: import.meta.env.BASE_URL,
+  isDev: import.meta.env.DEV,
+  pageProtocol: window.location.protocol,
+  pageHostname: window.location.hostname,
+});
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {

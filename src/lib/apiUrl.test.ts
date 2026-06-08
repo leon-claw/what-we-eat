@@ -1,10 +1,59 @@
 import { describe, expect, it } from "vitest";
 import {
   buildRoomWebSocketUrl,
+  resolveApiBase,
   resolveWebSocketBase,
 } from "./apiUrl";
 
 describe("API URL resolution", () => {
+  it("uses the Vite deployment subpath as the production API base", () => {
+    expect(
+      resolveApiBase({
+        configuredApiUrl: undefined,
+        baseUrl: "/app/what-we-eat/",
+        isDev: false,
+        pageProtocol: "https:",
+        pageHostname: "web.jianghong.site",
+      }),
+    ).toBe("/app/what-we-eat");
+  });
+
+  it("uses same-origin root paths when deployed at the domain root", () => {
+    expect(
+      resolveApiBase({
+        configuredApiUrl: undefined,
+        baseUrl: "/",
+        isDev: false,
+        pageProtocol: "https:",
+        pageHostname: "web.jianghong.site",
+      }),
+    ).toBe("");
+  });
+
+  it("keeps the local API port as the development fallback", () => {
+    expect(
+      resolveApiBase({
+        configuredApiUrl: undefined,
+        baseUrl: "/",
+        isDev: true,
+        pageProtocol: "http:",
+        pageHostname: "localhost",
+      }),
+    ).toBe("http://localhost:8787");
+  });
+
+  it("prefers a configured API URL and normalizes its trailing slash", () => {
+    expect(
+      resolveApiBase({
+        configuredApiUrl: "https://api.example.com/",
+        baseUrl: "/app/what-we-eat/",
+        isDev: false,
+        pageProtocol: "https:",
+        pageHostname: "web.jianghong.site",
+      }),
+    ).toBe("https://api.example.com");
+  });
+
   it("resolves a relative HTTPS API subpath to WSS", () => {
     expect(
       resolveWebSocketBase(

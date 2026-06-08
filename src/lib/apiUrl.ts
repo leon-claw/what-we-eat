@@ -1,3 +1,33 @@
+type ResolveApiBaseOptions = {
+  configuredApiUrl?: string;
+  baseUrl: string;
+  isDev: boolean;
+  pageProtocol: string;
+  pageHostname: string;
+};
+
+function trimTrailingSlash(value: string) {
+  return value.replace(/\/$/, "");
+}
+
+export function resolveApiBase({
+  configuredApiUrl,
+  baseUrl,
+  isDev,
+  pageProtocol,
+  pageHostname,
+}: ResolveApiBaseOptions) {
+  if (configuredApiUrl) {
+    return trimTrailingSlash(configuredApiUrl);
+  }
+
+  if (isDev) {
+    return `${pageProtocol}//${pageHostname || "localhost"}:8787`;
+  }
+
+  return baseUrl === "/" ? "" : trimTrailingSlash(baseUrl);
+}
+
 function toWebSocketProtocol(url: URL) {
   if (url.protocol === "https:") {
     url.protocol = "wss:";
@@ -14,7 +44,7 @@ export function resolveWebSocketBase(
   configuredWebSocketBase?: string,
 ) {
   const url = new URL(configuredWebSocketBase || apiBase, pageOrigin);
-  return toWebSocketProtocol(url).toString().replace(/\/$/, "");
+  return trimTrailingSlash(toWebSocketProtocol(url).toString());
 }
 
 export function buildRoomWebSocketUrl(
